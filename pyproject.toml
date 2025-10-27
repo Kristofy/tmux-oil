@@ -1,7 +1,9 @@
 [project]
 name = "tmux-oil"
 version = "0.1.0"
-description = "Add your description here"
+description = "An oil.nvim like buffer to manage your tmux windows in a session"
+authors = ["Osztopáni Kristóf <kristofosztopani@gmail.com>"]
+license = "MIT"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
