@@ -1,8 +1,5 @@
 import argparse
 from dataclasses import dataclass
-from sys import base_prefix
-from typing import cast
-import functools
 import libtmux
 
 import os

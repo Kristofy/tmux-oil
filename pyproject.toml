@@ -7,3 +7,11 @@ requires-python = ">=3.13"
 dependencies = [
     "libtmux>=0.46.2",
 ]
+
+[dependency-groups]
+dev = [
+    "nuitka>=2.8.4",
+]
+
+[project.scripts]
+build-binary = "tools.build_binary:main"
