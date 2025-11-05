@@ -10,6 +10,11 @@ from dataclasses import dataclass
 
 TMUX_WINDOW_DATA_FORMAT = "#{window_id};#{window_index};#{window_name}"
 
+server_socket_option = ["-L", "default"]
+def tmux_run(*args: str) -> str:
+    """Runs the command, returns stdout stripped, raises if error"""
+    return subprocess.check_output(["tmux", *server_socket_option, *args], text=True).strip()
+
 def edit_text(content: str = "", suffix: str = ".txt") -> str:
     editor_cmd = shlex.split(os.environ.get('EDITOR', 'vi'))
     tf = None
@@ -38,17 +43,9 @@ class TmuxWindow:
 
     @classmethod
     def from_session(cls, session_id: str, server_socket_path: str | None = None) -> list['TmuxWindow']:
-        # tmux -S /tmp/tmux-1000/default list-windows -t "dev" -F "#{window_index} #{window_id} #{window_name}" > /dev/null
-        socket_cmd = [] if server_socket_path is None else ["-S", server_socket_path]
-
-        result = subprocess.check_output(
-            ["tmux", *socket_cmd, "list-windows", "-t", session_id, "-F", TMUX_WINDOW_DATA_FORMAT],
-            text=True,
-        )
-
         return [
             TmuxWindow(server_socket_path, session_id, *cls.parse_window_data(line))
-            for line in result.strip().split('\n')
+            for line in tmux_run("list-windows", "-t", session_id, "-F", TMUX_WINDOW_DATA_FORMAT).split('\n')
         ]
 
 
@@ -77,8 +74,7 @@ class Plan:
     steps: list[CreateEditKind | DeleteEditKind | MoveEditKind | RenameEditKind]
     initial_windows: list[TmuxWindow]
 
-    def __init__(self, server_socket_path: Path | None, session_id: str, steps: list[CreateEditKind | DeleteEditKind | MoveEditKind | RenameEditKind], initial_windows: list[TmuxWindow]):
-        self.server_socket_cmd = [] if server_socket_path is None else ["-S", str(server_socket_path)]
+    def __init__(self, session_id: str, steps: list[CreateEditKind | DeleteEditKind | MoveEditKind | RenameEditKind], initial_windows: list[TmuxWindow]):
         self.session_id = session_id
         self.steps = steps
         self.initial_windows = initial_windows
@@ -94,23 +90,16 @@ class Plan:
         lines = [line for line in lines if not line.startswith('#') and line != ""]
         # Parse lines, accepted cases
 
+        if len(lines) == 0:
+            ans = input("You are about to delete all windows in the session. Are you sure? (y/N): ")
+            if ans.lower() == 'y':
+                tmux_run("kill-session", "-t", session_id)
+            exit(0)
+
         ##############
         # id: name   # -> split at the first :, and id must be a number, name can be empty, the the space is optional
         # _: name    # -> split at the first :, and id must be a '_', name can be empty, the the space is optional, means a new window, that we have to figure out the index for
         ##############
-
-        if len(lines) == 0:
-            # Prompt user if they are sure, then kill session
-            ans = input("You are about to delete all windows in the session. Are you sure? (y/N): ")
-            if ans.lower() != 'y':
-                exit(0)
-
-            subprocess.run(
-                ["tmux", "kill-session", "-t", session_id],
-                check=True,
-            )
-            exit(0)
-
 
         target_windows: list[tuple[int, str]] = []
         for line in lines:
@@ -218,42 +207,27 @@ class Plan:
             direction = 1 if dest > src_index else -1
             for index in range(src_index, target_index, direction):
                 # tmux swap-window -s {session_name}:{src} -t {session_name}:{dest}
-                subprocess.run([
-                        "tmux", "swap-window",
-                        "-s", f"{self.session_id}:{windows[index].window_id}",
-                        "-t", f"{self.session_id}:{windows[index + direction].window_id}"
-                    ],
-                    check=True,
+                tmux_run("swap-window",
+                    "-s", f"{self.session_id}:{windows[index].window_id}",
+                    "-t", f"{self.session_id}:{windows[index + direction].window_id}",
                 )
                 windows[index], windows[index + direction] = windows[index + direction], windows[index]
 
         for step in self.steps:
             match step:
                 case DeleteEditKind(win):
-                    subprocess.run(
-                        ["tmux", "kill-window", "-t", f"{self.session_id}:{win.window_id}"],
-                        check=True,
-                    )
+                    tmux_run("kill-window", "-t", f"{self.session_id}:{win.window_id}")
                 case RenameEditKind(win, name):
-                    subprocess.run(
-                        ["tmux", "rename-window", "-t", f"{self.session_id}:{win.window_id}", name],
-                        check=True,
-                    )
+                    tmux_run("rename-window", "-t", f"{self.session_id}:{win.window_id}", name)
                 case MoveEditKind(win, target_index):
                     tmux_swap_and_shift(win.index, target_index)
                 case CreateEditKind(index, name):
-                    result = subprocess.check_output(
-                        ["tmux", "new-window", "-t", f"{self.session_id}:", "-n", name, "-d", "-P", "-F", TMUX_WINDOW_DATA_FORMAT],
-                        text=True,
-                    )
-
+                    result = tmux_run("new-window", "-t", f"{self.session_id}:", "-n", name, "-d", "-P", "-F", TMUX_WINDOW_DATA_FORMAT)
                     win = TmuxWindow(None, self.session_id, *TmuxWindow.parse_window_data(result))
                     windows.append(win)
                     tmux_swap_and_shift(win.index, index)
 
-
 def main(session_id: str):
-    server_socket_path = None
 
     windows = TmuxWindow.from_session(session_id)
     buffer = ""
@@ -263,26 +237,15 @@ def main(session_id: str):
     buffer += "\n".join(f"{w.index}: {w.name}" for w in windows)
 
     user_request = edit_text(buffer, ".tmux")
-    if user_request is None:
-        raise RuntimeError("Something went wrong opening the file")
 
-    initial_active_window_id = subprocess.check_output(
-        ["tmux", "display-message", "-p", "-t", session_id, "#{window_id}"],
-        text=True,
-    ).strip()
-
+    initial_active_window_id = tmux_run("display-message", "-p", "-t", session_id, "#{window_id}")
     plan = Plan.create_plan(session_id, windows, user_request)
     plan.execute()
-
-    # activate the initial window
-    subprocess.run(
-        ["tmux", "select-window", "-t", f"{session_id}:{initial_active_window_id}"],
-        check=True,
-    )
+    tmux_run("select-window", "-t", f"{session_id}:{initial_active_window_id}")
 
 if __name__ == "__main__":
+    # server_socket_option = ["-S", "/tmp/tmux-1000/default"]
     parser = argparse.ArgumentParser(description="Process a tmux session ID.")
     parser.add_argument("session_id", type=str, help="The tmux session ID (e.g., 1, 0:1, or my-session)")
     args = parser.parse_args()
-    session_id = args.session_id
-    main(session_id)
+    main(args.session_id)
