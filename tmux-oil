@@ -4,29 +4,24 @@ import argparse
 import os
 import shlex
 import subprocess
-import tempfile
+from tempfile import NamedTemporaryFile
+from pathlib import Path
 from dataclasses import dataclass
 
 TMUX_WINDOW_DATA_FORMAT = "#{window_id};#{window_index};#{window_name}"
 
 def edit_text(content: str = "", suffix: str = ".txt") -> str:
-    editor = os.environ.get('EDITOR') or 'vi'
-    editor = shlex.split(editor)
-
-    with tempfile.NamedTemporaryFile(mode='w+', suffix=suffix, delete=False, encoding='utf-8') as tf:
-        tf.write(content)
-        tf.flush()
-        temp_path = tf.name
-
+    editor_cmd = shlex.split(os.environ.get('EDITOR', 'vi'))
+    tf = None
     try:
-        subprocess.run([*editor, temp_path], check=True)
-        with open(temp_path, 'r', encoding='utf-8') as f:
-            return f.read()
-    except subprocess.CalledProcessError:
-        # Editor exited with an error
-        raise RuntimeError("Editor exited with an error")
+        tf = NamedTemporaryFile(mode='w', suffix=suffix, delete=False, encoding='utf-8')
+        tf.write(content)
+        tf.close()
+        subprocess.run(editor_cmd + [tf.name], check=True)
+        return Path(tf.name).read_text(encoding='utf-8')
     finally:
-        os.unlink(temp_path)
+        if tf is not None:
+            Path(tf.name).unlink(missing_ok=True)
 
 @dataclass
 class TmuxWindow:
@@ -82,7 +77,8 @@ class Plan:
     steps: list[CreateEditKind | DeleteEditKind | MoveEditKind | RenameEditKind]
     initial_windows: list[TmuxWindow]
 
-    def __init__(self, session_id: str, steps: list[CreateEditKind | DeleteEditKind | MoveEditKind | RenameEditKind], initial_windows: list[TmuxWindow]):
+    def __init__(self, server_socket_path: Path | None, session_id: str, steps: list[CreateEditKind | DeleteEditKind | MoveEditKind | RenameEditKind], initial_windows: list[TmuxWindow]):
+        self.server_socket_cmd = [] if server_socket_path is None else ["-S", str(server_socket_path)]
         self.session_id = session_id
         self.steps = steps
         self.initial_windows = initial_windows
@@ -187,7 +183,7 @@ class Plan:
         #     print(f"move: {old_index} -> {new_index}")
         #     # target_windows_order[old_index] = (initial_old_index, target_windows_order[old_index][1])
         #     new_order[new_index], new_order[old_index] = new_order[old_index], new_order[new_index]
-        
+
         new_index_by_old_index: dict[int, int] = {old_index: i + base_index for i, (old_index, _) in enumerate([w for w in target_windows if w[0] != -1]) }
         new_order.sort(key=lambda win: new_index_by_old_index[win.index])
 
@@ -257,6 +253,8 @@ class Plan:
 
 
 def main(session_id: str):
+    server_socket_path = None
+
     windows = TmuxWindow.from_session(session_id)
     buffer = ""
     buffer += "# Edit windows for session. Format: N: Title\n"
