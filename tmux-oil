@@ -9,6 +9,12 @@ from pathlib import Path
 from dataclasses import dataclass
 
 TMUX_WINDOW_DATA_FORMAT = "#{window_id};#{window_index};#{window_name}"
+TMUX_OIL_TEMPLATE = """\
+# Edit windows for session. Format: N: Title
+# Use _: Title to create new windows. Comments (#) and blank lines are ignored.
+
+{}
+"""
 
 server_socket_option = ["-L", "default"]
 def tmux_run(*args: str) -> str:
@@ -27,6 +33,7 @@ def edit_text(content: str = "", suffix: str = ".txt") -> str:
     finally:
         if tf is not None:
             Path(tf.name).unlink(missing_ok=True)
+
 
 @dataclass
 class TmuxWindow:
@@ -206,7 +213,6 @@ class Plan:
             target_index = dest - base_index
             direction = 1 if dest > src_index else -1
             for index in range(src_index, target_index, direction):
-                # tmux swap-window -s {session_name}:{src} -t {session_name}:{dest}
                 tmux_run("swap-window",
                     "-s", f"{self.session_id}:{windows[index].window_id}",
                     "-t", f"{self.session_id}:{windows[index + direction].window_id}",
@@ -227,16 +233,11 @@ class Plan:
                     windows.append(win)
                     tmux_swap_and_shift(win.index, index)
 
+
 def main(session_id: str):
-
     windows = TmuxWindow.from_session(session_id)
-    buffer = ""
-    buffer += "# Edit windows for session. Format: N: Title\n"
-    buffer += "# Use _: Title to create new windows. Comments (#) and blank lines are ignored.\n"
-    buffer += "\n"
-    buffer += "\n".join(f"{w.index}: {w.name}" for w in windows)
-
-    user_request = edit_text(buffer, ".tmux")
+    windows_list_str= "\n".join(f"{w.index}: {w.name}" for w in windows)
+    user_request = edit_text(TMUX_OIL_TEMPLATE.format(windows_list_str), ".tmux")
 
     initial_active_window_id = tmux_run("display-message", "-p", "-t", session_id, "#{window_id}")
     plan = Plan.create_plan(session_id, windows, user_request)
