@@ -1,32 +1,28 @@
-import argparse
-from dataclasses import dataclass
-import libtmux
+#!/usr/bin/env python3
 
+import argparse
 import os
+import shlex
 import subprocess
 import tempfile
-from pathlib import Path
-from typing import Optional
 
-
-def edit_text(
-    content: str = "",
-    suffix: str = ".txt",
-) -> Optional[str]:
+def edit_text(content: str = "", suffix: str = ".txt") -> str | None:
     # Get the editor command
-    editor = os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'vi'
+    editor = os.environ.get('EDITOR') or 'vi'
+    editor = shlex.split(editor)
 
     # Create a temporary file
     with tempfile.NamedTemporaryFile(mode='w+', suffix=suffix, delete=False, encoding='utf-8') as tf:
-        temp_path = Path(tf.name)
         tf.write(content)
         tf.flush()
+        temp_path = tf.name
 
     try:
         # Open the editor
-        subprocess.run([editor, str(temp_path)], check=True)
-        # Read the edited content
-        edited_content = temp_path.read_text(encoding='utf-8')
+        subprocess.run([*editor, temp_path], check=True)
+        # Read the file at temp_path edited content
+        with open(temp_path, 'r', encoding='utf-8') as f:
+            edited_content = f.read()
         # Return None if file wasn't modified or is empty
         return edited_content
     except subprocess.CalledProcessError:
@@ -34,55 +30,93 @@ def edit_text(
         return None
     finally:
         # Clean up the temporary file
-        temp_path.unlink(missing_ok=True)
+        os.unlink(temp_path)
 
-@dataclass
 class TmuxWindow:
-    win: libtmux.Window
-    id: str
+    server_socket_path: str | None
+    session_id: str
+    window_id: str
     index: int
     name: str
+
+    def __init__(self, server_socket_path: str | None, session_id: str, window_id: str, index: int, name: str):
+        self.server_socket_path = server_socket_path
+        self.session_id = session_id
+        self.window_id = window_id
+        self.index = index
+        self.name = name
 
     @classmethod
-    def from_window(cls, win: libtmux.Window) -> 'TmuxWindow':
-        if win.id is None:
-            raise RuntimeError("Found None id, aborting")
+    def get_session(cls, session_id: str, server_socket_path: str | None = None) -> list['TmuxWindow']:
+        # tmux -S /tmp/tmux-1000/default list-windows -t "dev" -F "#{window_index} #{window_id} #{window_name}" > /dev/null
+        socket_cmd = [] if server_socket_path is None else ["-S", server_socket_path]
 
-        if win.index is None:
-            raise RuntimeError("Index is None, aborting")
+        result = subprocess.run(
+            ["tmux", *socket_cmd, "list-windows", "-t", session_id, "-F", "#{window_id};#{window_index};#{window_name}"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
 
-        if not win.index.isdigit():
-            raise RuntimeError(f"Found index, that is not a number {win.index}")
+        if result.returncode != 0:
+            raise RuntimeError(f"tmux command failed with error: {result.stderr}")
 
-        return cls(win, win.id, int(win.index), win.name or "")
+        def get_promps(line: str) -> tuple[str, int, str]:
+            window_id, window_index, window_name = line.split(';', 2)
+            window_name.strip()
+            return window_id, int(window_index), window_name
 
-@dataclass
+        return [
+            TmuxWindow(server_socket_path, session_id, *get_promps(line))
+            for line in result.stdout.strip().split('\n')
+        ]
+
+    def __repr__(self) -> str:
+        return f"TmuxWindow(id={self.window_id}, index={self.index}, name={self.name})"
+
+
 class CreateEditKind:
+    __match_args__ = ("index","name")
     index: int
     name: str
+    def __init__(self, index: int, name: str):
+        self.index = index
+        self.name = name
 
-@dataclass
 class RenameEditKind:
-    win: libtmux.Window
+    __match_args__ = ("win","name")
+    win: TmuxWindow
     name: str
+    def __init__(self, win: TmuxWindow, name: str):
+        self.win = win
+        self.name = name
 
-@dataclass
 class DeleteEditKind:
-    win: libtmux.Window
+    __match_args__ = ("win",)
+    win: TmuxWindow
+    def __init__(self, win: TmuxWindow):
+        self.win = win
 
-@dataclass
 class MoveEditKind:
-    win: libtmux.Window
+    __match_args__ = ("win","target_index")
+    win: TmuxWindow
     target_index: int
+    def __init__(self, win: TmuxWindow, target_index: int):
+        self.win = win
+        self.target_index = target_index
 
-@dataclass
 class Plan:
-    session: libtmux.Session
+    session_id: str
     steps: list[CreateEditKind | DeleteEditKind | MoveEditKind | RenameEditKind]
     initial_windows: list[TmuxWindow]
 
+    def __init__(self, session_id: str, steps: list[CreateEditKind | DeleteEditKind | MoveEditKind | RenameEditKind], initial_windows: list[TmuxWindow]):
+        self.session_id = session_id
+        self.steps = steps
+        self.initial_windows = initial_windows
+
     @classmethod
-    def create_plan(cls, session: libtmux.Session, initial_windows: list[TmuxWindow], new_state: str) -> 'Plan':
+    def create_plan(cls, session_id: str, initial_windows: list[TmuxWindow], new_state: str) -> 'Plan':
 
         existing_indexes: dict[int, TmuxWindow] = { win.index: win for win in initial_windows }
 
@@ -146,7 +180,7 @@ class Plan:
         index_offset: list[int] = [0] * len(initial_windows)
         for (index, win) in existing_indexes.items():
             if index not in remaining_indexes:
-                steps.append(DeleteEditKind(win.win))
+                steps.append(DeleteEditKind(win))
                 index_offset[win.index - base_index] = 1
 
         for i in range(1, len(index_offset)):
@@ -157,7 +191,7 @@ class Plan:
         for (index, win) in existing_indexes.items():
             # rename if it still exists and the name is different
             if index in remaining_indexes and remaining_indexes[index] != win.name:
-                steps.append(RenameEditKind(win.win, remaining_indexes[index]))
+                steps.append(RenameEditKind(win, remaining_indexes[index]))
 
         # Reorder
         # its tricky, since we can only move from A to pos B, meaning that if A < B then all indexes bigger then A and smaller then B will shift down
@@ -186,7 +220,7 @@ class Plan:
                 # 1 3 4 5 2 || op 3 -> 4 
                 index = indecies.index(old_index)
                 indecies.pop(index)
-                steps.append(MoveEditKind(win.win, new_index))
+                steps.append(MoveEditKind(win, new_index))
             else:
                 indecies.pop()
 
@@ -195,49 +229,81 @@ class Plan:
             if index == -1:
                 steps.append(CreateEditKind(i + base_index, name))
 
-        return Plan(session, steps, initial_windows)
+        return Plan(session_id, steps, initial_windows)
 
 
     def execute(self) -> None:
 
-        windows = list(self.session.windows)
-        windows.sort(key = lambda x: int(x.index or ""))
-        base_index = int(windows[0].index or "")
+        windows = TmuxWindow.get_session(self.session_id)
+        windows.sort(key = lambda x: x.index)
+        base_index = windows[0].index
 
         def tmux_swap_and_shift(src: int, dest:int) -> None:
             current_pos = src
             while current_pos > dest:
+                current_index = current_pos - base_index
+                target_index = current_pos - base_index - 1
                 print(f"down, at index: {current_pos - base_index}")
-                windows[current_pos - base_index].cmd("swap-window", "-s", f"{self.session.name}:{windows[current_pos - base_index].index}", target=f"{self.session.name}:{windows[current_pos - base_index - 1].index}")
-                # windows[current_pos - base_index], windows[current_pos - 1 - base_index] = windows[current_pos - 1 - base_index], windows[current_pos - base_index]
+
+                subprocess.run(
+                    ["tmux", "swap-window", "-s", f"{self.session_id}:{windows[current_index].index}", "-t", f"{self.session_id}:{windows[target_index].index}"],
+                    check=True,
+                )
+                # tmux swap-window -s {session_name}:{src} -t {session_name}:{dest}
+                # windows[current_index].cmd("swap-window", "-s", f"{self.session.name}:{windows[current_index].index}", target=f"{self.session.name}:{windows[target_index].index}")
+                # windows[current_pos - base_index].cmd("swap-window", "-s", f"{self.session.name}:{windows[current_pos - base_index].index}", target=f"{self.session.name}:{windows[current_pos - base_index - 1].index}")
                 current_pos -= 1
 
             while current_pos < dest:
-                print(f"up, at index: {current_pos - base_index}")
-                windows[current_pos - base_index].cmd("swap-window", "-s", f"{self.session.name}:{windows[current_pos - base_index].index}", target=f"{self.session.name}:{windows[current_pos - base_index + 1].index}")
-                # windows[current_pos - base_index], windows[current_pos + 1 - base_index] = windows[current_pos + 1 - base_index], windows[current_pos - base_index]
+                current_index = current_pos - base_index
+                target_index = current_pos - base_index + 1
+                subprocess.run(
+                    ["tmux", "swap-window", "-s", f"{self.session_id}:{windows[current_index].index}", "-t", f"{self.session_id}:{windows[target_index].index}"],
+                    check=True,
+                )
+                # print(f"up, at index: {current_pos - base_index}")
+                # windows[current_pos - base_index].cmd("swap-window", "-s", f"{self.session.name}:{windows[current_pos - base_index].index}", target=f"{self.session.name}:{windows[current_pos - base_index + 1].index}")
                 current_pos += 1
 
         for step in self.steps:
             match step:
                 case DeleteEditKind(win):
-                    win.kill()
+                    # win.kill()
+                    subprocess.run(
+                        ["tmux", "kill-window", "-t", f"{self.session_id}:{win.index}"],
+                        check=True,
+                    )
                 case RenameEditKind(win, name):
-                    win.rename_window(name)
+                    # win.rename_window(name)
+                    subprocess.run(
+                        ["tmux", "rename-window", "-t", f"{self.session_id}:{win.index}", name],
+                        check=True,
+                    )
                 case MoveEditKind(win, target_index):
                     # win.move_window(str(target_index))
-                    tmux_swap_and_shift(int(win.index or ""), target_index)
+                    tmux_swap_and_shift(win.index, target_index)
                 case CreateEditKind(index, name):
-                    win = self.session.new_window(name)
-                    tmux_swap_and_shift(int(win.index or ""), index)
+                    # win = self.session.new_window(name)
+                    result = subprocess.run(
+                        ["tmux", "new-window", "-t", f"{self.session_id}:", "-n", name, "-d", "-P", "-F", "#{window_id};#{window_index}"],
+                        capture_output=True,
+                        text=True,
+                        check=True
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(f"tmux command failed with error: {result.stderr}")
+
+                    window_id, window_index_str = result.stdout.strip().split(';', 1)
+                    window_index = int(window_index_str)
+
+                    win = TmuxWindow(None, self.session_id, window_id, window_index, name)
+                    windows.append(win)
+
+                    tmux_swap_and_shift(win.index, index)
 
 
 def main(session_id: str):
-    server = libtmux.Server()  # Current server
-    session = server.sessions.get(lambda x: x.name == session_id)
-    if not session:
-        raise RuntimeError("Found no sessions, and the lib does not work, since it sould not return None ever")
-    windows = [TmuxWindow.from_window(win) for win in session.windows]
+    windows = TmuxWindow.get_session(session_id)
 
 
     # windows = list(session.windows)
@@ -257,10 +323,11 @@ def main(session_id: str):
     buffer += "\n".join(f"{w.index}: {w.name}" for w in windows)
 
     user_request = edit_text(buffer, ".tmux")
+    # user_request = buffer
     if user_request is None:
         raise RuntimeError("Something went wrong opening the file")
 
-    plan = Plan.create_plan(session, windows, user_request)
+    plan = Plan.create_plan(session_id, windows, user_request)
 
     print(plan.steps, flush=False)
 
