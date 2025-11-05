@@ -132,8 +132,16 @@ class Plan:
         ##############
 
         if len(lines) == 0:
-            # TODO: Handle close session
-            raise RuntimeError("We do now currently support deleting the session")
+            # Prompt user if they are sure, then kill session
+            ans = input("You are about to delete all windows in the session. Are you sure? (y/N): ")
+            if ans.lower() != 'y':
+                exit(0)
+
+            subprocess.run(
+                ["tmux", "kill-session", "-t", session_id],
+                check=True,
+            )
+            exit(0)
 
 
         target_windows: list[tuple[int, str]] = []
