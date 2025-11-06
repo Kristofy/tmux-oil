@@ -208,7 +208,7 @@ class Plan:
         windows = self.initial_windows.copy()
         base_index = windows[0].index
 
-        def tmux_swap_and_shift(original_index: int, dest:int) -> None:
+        def move_index_to_target(original_index: int, dest:int) -> None:
             src_index = next(i for i, win in enumerate(windows) if win.index == original_index)
             target_index = dest - base_index
             direction = 1 if dest > src_index else -1
@@ -223,15 +223,16 @@ class Plan:
             match step:
                 case DeleteEditKind(win):
                     tmux_run("kill-window", "-t", f"{self.session_id}:{win.window_id}")
+                    windows = [w for w in windows if w.window_id != win.window_id]
                 case RenameEditKind(win, name):
                     tmux_run("rename-window", "-t", f"{self.session_id}:{win.window_id}", name)
                 case MoveEditKind(win, target_index):
-                    tmux_swap_and_shift(win.index, target_index)
+                    move_index_to_target(win.index, target_index)
                 case CreateEditKind(index, name):
                     result = tmux_run("new-window", "-t", f"{self.session_id}:", "-n", name, "-d", "-P", "-F", TMUX_WINDOW_DATA_FORMAT)
                     win = TmuxWindow(None, self.session_id, *TmuxWindow.parse_window_data(result))
                     windows.append(win)
-                    tmux_swap_and_shift(win.index, index)
+                    move_index_to_target(win.index, index)
 
 
 def main(session_id: str):

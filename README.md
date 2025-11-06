@@ -2,6 +2,8 @@
 
 Delete, reorder, rename, and create tmux windows quickly using your editor. tmux-oil reads your current session state, opens a temporary buffer in $EDITOR, and then applies the changes.
 
+![Example screencast](example.gif)
+
 This project is inspired by the excellent Oil file manager for Neovim.
 
 - oil.nvim: https://github.com/stevearc/oil.nvim
