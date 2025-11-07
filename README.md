@@ -104,8 +104,6 @@ Result:
 - Windows reordered to `[1, 0, 2]`
 - New window `scratch` created and placed at the appropriate index
 
-#TODO(Kristofy) Insert a short screencast GIF of this flow.
-
 ---
 
 ## Run inside tmux (popup + keybind)
